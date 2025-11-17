@@ -9,7 +9,8 @@ First, run the development server:
 pnpm install
 # Then
 pnpm dev
-```
+```<img width="2486" height="1982" alt="CleanShot 2025-11-17 at 00 12 56@2x" src="https://github.com/user-attachments/assets/e4b17d36-d449-4c95-996c-498ef29ffce6" />
+
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
