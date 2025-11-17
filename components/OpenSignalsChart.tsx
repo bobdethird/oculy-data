@@ -1,13 +1,15 @@
 "use client"
 
-import { useEffect, useState, useRef } from "react"
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Brush } from "recharts"
+import { useState, useRef, useEffect } from "react"
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Brush, ReferenceArea } from "recharts"
 import {
   ChartContainer,
   ChartTooltip,
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart"
+import { Input } from "@/components/ui/input"
+import { Button } from "@/components/ui/button"
 
 interface DataPoint {
   timestamp: number
@@ -18,6 +20,24 @@ interface DataPoint {
   A5: number
   A6: number
 }
+
+interface LabelSegment {
+  start: number
+  end: number
+  label: string
+}
+
+const LABEL_COLORS: Record<string, string> = {
+  stare: "hsl(221 83% 65%)",
+  left: "hsl(0 84% 60%)",
+  up: "hsl(142 71% 45%)",
+  down: "hsl(25 95% 53%)",
+  right: "hsl(291 64% 42%)",
+  unknown: "hsl(220 13% 69%)",
+  blink: "hsl(192 85% 44%)",
+}
+
+const DEFAULT_LABEL_COLOR = "hsl(217 22% 67%)"
 
 const chartConfig = {
   A1: {
@@ -48,118 +68,171 @@ const chartConfig = {
 
 export function OpenSignalsChart() {
   const [data, setData] = useState<DataPoint[]>([])
-  const [loading, setLoading] = useState(true)
+  const [labelSegments, setLabelSegments] = useState<LabelSegment[]>([])
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [xDomain, setXDomain] = useState<[number, number] | undefined>(undefined)
   const [yRange, setYRange] = useState<[number, number] | null>(null)
+  const [signalFile, setSignalFile] = useState<File | null>(null)
+  const [keypressFile, setKeypressFile] = useState<File | null>(null)
   const chartRef = useRef<HTMLDivElement>(null)
   const isDragging = useRef(false)
   const dragStart = useRef<{ x: number; domain: [number, number] } | null>(null)
+  const signalInputRef = useRef<HTMLInputElement>(null)
+  const keypressInputRef = useRef<HTMLInputElement>(null)
 
   const isEventFromBrush = (target: EventTarget | null) => {
     return target instanceof Element && !!target.closest(".recharts-brush")
   }
 
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const response = await fetch("/opensignals_84BA20AEBFDA_2025-11-16_17-32-19.txt")
-        if (!response.ok) {
-          throw new Error("Failed to load data file")
+  async function processFiles(signalFile: File, keypressFile: File) {
+    setLoading(true)
+    setError(null)
+    
+    try {
+      const [signalText, keypressText] = await Promise.all([
+        signalFile.text(),
+        keypressFile.text(),
+      ])
+
+      const lines = signalText.split("\n")
+
+      // Parse header to get sampling rate & absolute start time
+      let samplingRate = 1000 // default
+      let dataStartIndex = 0
+      let signalStartTimestampMs: number | null = null
+
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].startsWith("# EndOfHeader")) {
+          dataStartIndex = i + 1
+          break
         }
-        
-        const text = await response.text()
-        const lines = text.split("\n")
-        
-        // Parse header to get sampling rate
-        let samplingRate = 1000 // default
-        let dataStartIndex = 0
-        
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].startsWith("# EndOfHeader")) {
-            dataStartIndex = i + 1
-            break
-          }
-          if (lines[i].startsWith("#") && lines[i].includes("sampling rate")) {
-            try {
-              const jsonStr = lines[i].substring(2) // Remove "# "
-              const headerData = JSON.parse(jsonStr)
-              const deviceKey = Object.keys(headerData)[0]
-              if (deviceKey && headerData[deviceKey]["sampling rate"]) {
-                samplingRate = headerData[deviceKey]["sampling rate"]
+        if (lines[i].startsWith("#") && lines[i].includes("sampling rate")) {
+          try {
+            const jsonStr = lines[i].substring(2) // Remove "# "
+            const headerData = JSON.parse(jsonStr)
+            const deviceKey = Object.keys(headerData)[0]
+            if (deviceKey) {
+              const deviceInfo = headerData[deviceKey]
+              if (deviceInfo?.["sampling rate"]) {
+                samplingRate = deviceInfo["sampling rate"]
               }
-            } catch (e) {
-              console.warn("Could not parse header JSON, using default sampling rate")
+              if (deviceInfo?.date && deviceInfo?.time) {
+                const isoString = `${deviceInfo.date}T${deviceInfo.time}`
+                const parsedDate = new Date(isoString)
+                if (!isNaN(parsedDate.getTime())) {
+                  signalStartTimestampMs = parsedDate.getTime()
+                }
+              }
             }
+          } catch (e) {
+            console.warn("Could not parse header JSON, using default sampling rate", e)
           }
         }
+      }
+      
+      // Parse data rows
+      const parsedData: DataPoint[] = []
+      let minA4 = Number.POSITIVE_INFINITY
+      let maxA4 = Number.NEGATIVE_INFINITY
+      const sampleInterval = 1 / samplingRate // seconds per sample
+      
+      // Sample data to improve performance (take every Nth point)
+      // Adjust this value to balance performance vs detail
+      const sampleStep = Math.max(1, Math.floor((lines.length - dataStartIndex) / 10000))
+      
+      for (let i = dataStartIndex; i < lines.length; i += sampleStep) {
+        const line = lines[i].trim()
+        if (!line) continue
         
-        // Parse data rows
-        const parsedData: DataPoint[] = []
-        let minA4 = Number.POSITIVE_INFINITY
-        let maxA4 = Number.NEGATIVE_INFINITY
-        const sampleInterval = 1 / samplingRate // seconds per sample
+        const values = line.split(/\s+/)
+        if (values.length < 11) continue
         
-        // Sample data to improve performance (take every Nth point)
-        // Adjust this value to balance performance vs detail
-        const sampleStep = Math.max(1, Math.floor((lines.length - dataStartIndex) / 10000))
+        // Columns: nSeq, I1, I2, O1, O2, A1, A2, A3, A4, A5, A6
+        // A1-A6 are at indices 5-10
+        const timestamp = (i - dataStartIndex) * sampleInterval
         
-        for (let i = dataStartIndex; i < lines.length; i += sampleStep) {
-          const line = lines[i].trim()
-          if (!line) continue
-          
-          const values = line.split(/\s+/)
-          if (values.length < 11) continue
-          
-          // Columns: nSeq, I1, I2, O1, O2, A1, A2, A3, A4, A5, A6
-          // A1-A6 are at indices 5-10
-          const timestamp = (i - dataStartIndex) * sampleInterval
-          
-          const A1 = parseFloat(values[5]) || 0
-          const A2 = parseFloat(values[6]) || 0
-          const A3 = parseFloat(values[7]) || 0
-          const A4 = parseFloat(values[8]) || 0
-          const A5 = parseFloat(values[9]) || 0
-          const A6 = parseFloat(values[10]) || 0
+        const A1 = parseFloat(values[5]) || 0
+        const A2 = parseFloat(values[6]) || 0
+        const A3 = parseFloat(values[7]) || 0
+        const A4 = parseFloat(values[8]) || 0
+        const A5 = parseFloat(values[9]) || 0
+        const A6 = parseFloat(values[10]) || 0
 
-          minA4 = Math.min(minA4, A4)
-          maxA4 = Math.max(maxA4, A4)
+        minA4 = Math.min(minA4, A4)
+        maxA4 = Math.max(maxA4, A4)
 
-          parsedData.push({
-            timestamp,
-            A1,
-            A2,
-            A3,
-            A4,
-            A5,
-            A6,
-          })
-        }
-        
-        setData(parsedData)
+        parsedData.push({
+          timestamp,
+          A1,
+          A2,
+          A3,
+          A4,
+          A5,
+          A6,
+        })
+      }
+      
+      setData(parsedData)
 
-        if (parsedData.length > 0) {
-          setYRange([minA4, maxA4])
-        } else {
-          setYRange(null)
-        }
-        
-        // Set initial domain to show first portion of data
-        if (parsedData.length > 0) {
-          const totalTime = parsedData[parsedData.length - 1].timestamp
-          const initialWindow = Math.min(totalTime, 10) // Show first 10 seconds or total if less
-          setXDomain([0, initialWindow])
-        }
-        
-        setLoading(false)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Unknown error")
-        setLoading(false)
+      if (parsedData.length > 0) {
+        setYRange([minA4, maxA4])
+      } else {
+        setYRange(null)
+      }
+      
+      const timeMin = parsedData.length > 0 ? parsedData[0].timestamp : 0
+      const timeMax = parsedData.length > 0 ? parsedData[parsedData.length - 1].timestamp : 0
+
+      // Align keypress labels with the OpenSignals timestamps
+      const segments = parseKeypressLabelSegments(
+        keypressText,
+        signalStartTimestampMs,
+        [timeMin, timeMax]
+      )
+      setLabelSegments(segments)
+
+      // Set initial domain to show first portion of data
+      if (parsedData.length > 0) {
+        const totalDuration = Math.max(timeMax - timeMin, 0)
+        const windowSize = Math.min(totalDuration, 10) // Show first 10 seconds or total if less
+        setXDomain([timeMin, timeMin + windowSize])
+      }
+      
+      setLoading(false)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error")
+      setLoading(false)
+    }
+  }
+
+  const handleSignalFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      setSignalFile(file)
+      if (keypressFile) {
+        processFiles(file, keypressFile)
       }
     }
-    
-    loadData()
-  }, [])
+  }
+
+  const handleKeypressFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      setKeypressFile(file)
+      if (signalFile) {
+        processFiles(signalFile, file)
+      }
+    }
+  }
+
+  const handleLoadFiles = () => {
+    if (signalFile && keypressFile) {
+      processFiles(signalFile, keypressFile)
+    } else {
+      setError("Please select both files")
+    }
+  }
 
   // Handle mouse move for dragging - must be before conditional returns
   useEffect(() => {
@@ -209,6 +282,65 @@ export function OpenSignalsChart() {
     }
   }, [data])
 
+  if (data.length === 0 && !loading) {
+    return (
+      <div className="w-full space-y-6">
+        <div className="space-y-2">
+          <h2 className="text-2xl font-semibold">OpenSignals Data Visualization</h2>
+          <p className="text-sm text-muted-foreground">
+            Upload your OpenSignals data file and keypress labels file to visualize the data.
+          </p>
+        </div>
+        <div className="space-y-4 rounded-lg border p-6">
+          <div className="space-y-2">
+            <label htmlFor="signal-file" className="text-sm font-medium">
+              OpenSignals Data File
+            </label>
+            <Input
+              ref={signalInputRef}
+              id="signal-file"
+              type="file"
+              accept=".txt"
+              onChange={handleSignalFileChange}
+            />
+            {signalFile && (
+              <p className="text-xs text-muted-foreground">
+                Selected: {signalFile.name}
+              </p>
+            )}
+          </div>
+          <div className="space-y-2">
+            <label htmlFor="keypress-file" className="text-sm font-medium">
+              Keypress Labels File
+            </label>
+            <Input
+              ref={keypressInputRef}
+              id="keypress-file"
+              type="file"
+              accept=".txt"
+              onChange={handleKeypressFileChange}
+            />
+            {keypressFile && (
+              <p className="text-xs text-muted-foreground">
+                Selected: {keypressFile.name}
+              </p>
+            )}
+          </div>
+          <Button
+            onClick={handleLoadFiles}
+            disabled={!signalFile || !keypressFile || loading}
+            className="w-full"
+          >
+            {loading ? "Loading..." : "Load Data"}
+          </Button>
+          {error && (
+            <p className="text-sm text-destructive">{error}</p>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center p-8">
@@ -217,7 +349,7 @@ export function OpenSignalsChart() {
     )
   }
 
-  if (error) {
+  if (error && data.length === 0) {
     return (
       <div className="flex items-center justify-center p-8">
         <p className="text-destructive">Error: {error}</p>
@@ -225,17 +357,11 @@ export function OpenSignalsChart() {
     )
   }
 
-  if (data.length === 0) {
-    return (
-      <div className="flex items-center justify-center p-8">
-        <p className="text-muted-foreground">No data available</p>
-      </div>
-    )
-  }
-
   const channelConfig = {
     A4: chartConfig.A4,
   } satisfies ChartConfig
+
+  const uniqueLabelNames = Array.from(new Set(labelSegments.map((segment) => segment.label)))
 
   // Get min and max timestamps
   const timeMin = data.length > 0 ? data[0].timestamp : 0
@@ -323,16 +449,42 @@ export function OpenSignalsChart() {
   return (
     <div className="w-full space-y-4">
       <div className="space-y-2">
-        <h2 className="text-2xl font-semibold">OpenSignals Data Visualization - A4</h2>
-        <p className="text-sm text-muted-foreground">
-          Displaying {data.length.toLocaleString()} data points
-          {xDomain && (
-            <span className="ml-2">
-              (Showing {currentDomain[0].toFixed(2)}s - {currentDomain[1].toFixed(2)}s)
-            </span>
-          )}
-        </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-2xl font-semibold">OpenSignals Data Visualization - A4</h2>
+            <p className="text-sm text-muted-foreground">
+              Displaying {data.length.toLocaleString()} data points
+              {xDomain && (
+                <span className="ml-2">
+                  (Showing {currentDomain[0].toFixed(2)}s - {currentDomain[1].toFixed(2)}s)
+                </span>
+              )}
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setData([])
+              setLabelSegments([])
+              setSignalFile(null)
+              setKeypressFile(null)
+              setXDomain(undefined)
+              setYRange(null)
+              setError(null)
+              if (signalInputRef.current) signalInputRef.current.value = ""
+              if (keypressInputRef.current) keypressInputRef.current.value = ""
+            }}
+          >
+            Reset
+          </Button>
+        </div>
       </div>
+      {error && (
+        <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3">
+          <p className="text-sm text-destructive">{error}</p>
+        </div>
+      )}
       <div
         ref={chartRef}
         onWheel={handleWheel}
@@ -359,6 +511,20 @@ export function OpenSignalsChart() {
               {...(yDomain ? { domain: yDomain } : {})}
               {...(yTicks ? { ticks: yTicks } : {})}
             />
+            {labelSegments.map((segment, idx) => {
+              const color = getLabelColor(segment.label)
+              return (
+                <ReferenceArea
+                  key={`${segment.label}-${idx}-${segment.start.toFixed(3)}`}
+                  x1={segment.start}
+                  x2={segment.end}
+                  stroke="none"
+                  fill={color}
+                  fillOpacity={0.12}
+                  {...(yDomain ? { y1: yDomain[0], y2: yDomain[1] } : {})}
+                />
+              )
+            })}
             <ChartTooltip content={<ChartTooltipContent />} />
             <Line
               type="monotone"
@@ -389,10 +555,159 @@ export function OpenSignalsChart() {
           </LineChart>
         </ChartContainer>
       </div>
+      {labelSegments.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-sm font-medium">Keypress labels</p>
+          <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+            {uniqueLabelNames.map((label) => (
+              <span key={label} className="flex items-center gap-1.5">
+                <span
+                  className="h-3 w-3 rounded-sm"
+                  style={{ backgroundColor: getLabelColor(label) }}
+                />
+                {label}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       <p className="text-xs text-muted-foreground">
         Scroll with mouse wheel or drag the brush below to navigate. Drag on the chart to pan.
       </p>
     </div>
   )
+}
+
+function getLabelColor(label: string) {
+  return LABEL_COLORS[label] ?? DEFAULT_LABEL_COLOR
+}
+
+function parseKeypressLabelSegments(
+  fileContents: string,
+  signalStartTimestampMs: number | null,
+  signalTimeRange: [number, number]
+): LabelSegment[] {
+  if (!fileContents) {
+    return []
+  }
+  if (signalStartTimestampMs === null) {
+    console.warn("Missing OpenSignals start timestamp; cannot align keypress labels.")
+    return []
+  }
+
+  const lines = fileContents.split("\n")
+  let dataStartIndex = 0
+  let recordingStartTimestampMs: number | null = null
+  let samplingRate = 1000
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i].trim()
+    if (!rawLine) continue
+
+    if (rawLine.startsWith("# Recording started:")) {
+      const datePart = rawLine.replace("# Recording started:", "").trim()
+      const parsedDate = new Date(datePart.replace(" ", "T"))
+      if (!isNaN(parsedDate.getTime())) {
+        recordingStartTimestampMs = parsedDate.getTime()
+      }
+    }
+
+    if (rawLine.startsWith("# Sampling rate")) {
+      const match = rawLine.match(/(\d+)\s*Hz/i)
+      if (match) {
+        const parsedRate = Number(match[1])
+        if (!Number.isNaN(parsedRate) && parsedRate > 0) {
+          samplingRate = parsedRate
+        }
+      }
+    }
+
+    if (rawLine.startsWith("# EndOfHeader")) {
+      dataStartIndex = i + 1
+      break
+    }
+  }
+
+  const sampleIntervalSec = samplingRate > 0 ? 1 / samplingRate : 0.001
+  const rawSegments: LabelSegment[] = []
+  let currentSegment: LabelSegment | null = null
+
+  for (let i = dataStartIndex; i < lines.length; i++) {
+    const line = lines[i].trim()
+    if (!line || line.startsWith("#")) continue
+
+    const parts = line.split(/\s+/)
+    if (parts.length < 4) continue
+
+    const timestampMs = Number(parts[1])
+    const elapsedMs = Number(parts[2])
+    const label = parts[3]
+    if (!label) continue
+
+    let absoluteTimestampMs = Number.isFinite(timestampMs) ? timestampMs : null
+
+    if (absoluteTimestampMs === null && recordingStartTimestampMs !== null && Number.isFinite(elapsedMs)) {
+      absoluteTimestampMs = recordingStartTimestampMs + elapsedMs
+    }
+
+    if (absoluteTimestampMs === null) {
+      continue
+    }
+
+    const relativeSeconds = (absoluteTimestampMs - signalStartTimestampMs) / 1000
+
+    if (!Number.isFinite(relativeSeconds)) {
+      continue
+    }
+
+    if (!currentSegment) {
+      currentSegment = {
+        start: relativeSeconds,
+        end: relativeSeconds,
+        label,
+      }
+      continue
+    }
+
+    if (currentSegment.label === label) {
+      currentSegment.end = relativeSeconds
+    } else {
+      if (currentSegment.end < currentSegment.start) {
+        currentSegment.end = currentSegment.start
+      }
+      rawSegments.push(currentSegment)
+      currentSegment = {
+        start: relativeSeconds,
+        end: relativeSeconds,
+        label,
+      }
+    }
+  }
+
+  if (currentSegment) {
+    if (currentSegment.end < currentSegment.start) {
+      currentSegment.end = currentSegment.start
+    }
+    rawSegments.push(currentSegment)
+  }
+
+  const [rangeStart, rangeEnd] = signalTimeRange
+  if (rangeEnd <= rangeStart) {
+    return []
+  }
+
+  return rawSegments
+    .map((segment) => {
+      const minEnd = segment.start + sampleIntervalSec
+      const expandedEnd = Math.max(segment.end, minEnd)
+      const clampedStart = Math.max(rangeStart, segment.start)
+      const clampedEnd = Math.min(rangeEnd, expandedEnd)
+      return {
+        label: segment.label,
+        start: clampedStart,
+        end: clampedEnd,
+      }
+    })
+    .filter((segment) => segment.end > segment.start)
 }
 
