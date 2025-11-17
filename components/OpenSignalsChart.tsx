@@ -102,6 +102,9 @@ export function OpenSignalsChart() {
   const [cropEnd, setCropEnd] = useState<string>("")
   const [showCropPreview, setShowCropPreview] = useState(false)
   
+  // State for tooltip visibility
+  const [showTooltips, setShowTooltips] = useState(true)
+  
   // State to track original signal start timestamp for export
   const [signalStartTimestampMs, setSignalStartTimestampMs] = useState<number | null>(null)
   const [keypressStartTimestampMs, setKeypressStartTimestampMs] = useState<number | null>(null)
@@ -876,6 +879,13 @@ export function OpenSignalsChart() {
           </div>
           <div className="flex gap-2">
             <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowTooltips(!showTooltips)}
+            >
+              {showTooltips ? "Hide" : "Show"} Tooltips
+            </Button>
+            <Button
               variant="default"
               size="sm"
               onClick={handleExportLabels}
@@ -1109,11 +1119,13 @@ export function OpenSignalsChart() {
                 </g>
               )
             })}
-            <ChartTooltip
-              content={
-                <HighlightAwareTooltipContent labelSegments={labelSegments} />
-              }
-            />
+            {showTooltips && (
+              <ChartTooltip
+                content={
+                  <HighlightAwareTooltipContent labelSegments={labelSegments} />
+                }
+              />
+            )}
             <Line
               type="monotone"
               dataKey="A4"
