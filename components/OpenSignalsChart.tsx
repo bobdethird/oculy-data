@@ -10,6 +10,13 @@ import {
 } from "@/components/ui/chart"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 
 interface DataPoint {
   timestamp: number
@@ -101,6 +108,15 @@ export function OpenSignalsChart() {
   const [cropStart, setCropStart] = useState<string>("")
   const [cropEnd, setCropEnd] = useState<string>("")
   const [showCropPreview, setShowCropPreview] = useState(false)
+  
+  // State for adding new segments
+  const [newSegmentStart, setNewSegmentStart] = useState<string>("")
+  const [newSegmentEnd, setNewSegmentEnd] = useState<string>("")
+  const [newSegmentLabel, setNewSegmentLabel] = useState<string>("")
+  const [isCustomLabel, setIsCustomLabel] = useState(false)
+  
+  // State for hovering over quick-add buttons
+  const [hoveredQuickAdd, setHoveredQuickAdd] = useState<number | null>(null)
   
   // State for tooltip visibility
   const [showTooltips, setShowTooltips] = useState(true)
@@ -415,6 +431,130 @@ export function OpenSignalsChart() {
     setCropEnd("")
     setShowCropPreview(false)
     setSelectedSegmentIndex(null)
+    setError(null)
+  }
+
+  const handleQuickAddSegment = (startTime: number) => {
+    if (data.length === 0) return
+    
+    const timeMax = data[data.length - 1].timestamp
+    const endTime = Math.min(startTime + 0.2, timeMax)
+    
+    // Pre-fill the form
+    setNewSegmentStart(startTime.toFixed(2))
+    setNewSegmentEnd(endTime.toFixed(2))
+    setIsCustomLabel(false)
+    
+    // Scroll to the form
+    const formElement = document.getElementById('add-segment-form')
+    if (formElement) {
+      formElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }
+
+  const handleAddNewSegment = () => {
+    if (data.length === 0) return
+    
+    const timeMin = data[0].timestamp
+    const timeMax = data[data.length - 1].timestamp
+    
+    const startTime = parseFloat(newSegmentStart)
+    const endTime = parseFloat(newSegmentEnd)
+    const label = newSegmentLabel.trim()
+    
+    if (!label) {
+      setError("Please enter a label for the new segment.")
+      return
+    }
+    
+    if (isNaN(startTime) || isNaN(endTime)) {
+      setError("Invalid segment times. Please enter valid numbers.")
+      return
+    }
+    
+    if (startTime >= endTime) {
+      setError("Segment start time must be less than end time.")
+      return
+    }
+    
+    if (startTime < timeMin || endTime > timeMax) {
+      setError(`Segment times must be within data range (${timeMin.toFixed(2)}s - ${timeMax.toFixed(2)}s).`)
+      return
+    }
+    
+    // Create the new segment
+    const newSegment: LabelSegment = {
+      start: startTime,
+      end: endTime,
+      label: label
+    }
+    
+    // Process existing segments to handle overlaps
+    const processedSegments: LabelSegment[] = []
+    
+    for (const segment of labelSegments) {
+      // Check if this segment overlaps with the new segment
+      const overlaps = !(segment.end <= startTime || segment.start >= endTime)
+      
+      if (!overlaps) {
+        // No overlap - keep the segment as is
+        processedSegments.push(segment)
+      } else {
+        // Handle overlap by trimming or splitting the existing segment
+        
+        // Case 1: New segment completely contains existing segment → Delete existing segment
+        if (startTime <= segment.start && endTime >= segment.end) {
+          // Segment is completely covered, don't add it
+          continue
+        }
+        
+        // Case 2: Existing segment completely contains new segment → Split into two
+        if (segment.start < startTime && segment.end > endTime) {
+          // Keep the part before the new segment
+          processedSegments.push({
+            ...segment,
+            end: startTime
+          })
+          // Keep the part after the new segment
+          processedSegments.push({
+            ...segment,
+            start: endTime
+          })
+          continue
+        }
+        
+        // Case 3: New segment overlaps the start of existing segment
+        if (startTime <= segment.start && endTime < segment.end) {
+          // Trim the existing segment's start
+          processedSegments.push({
+            ...segment,
+            start: endTime
+          })
+          continue
+        }
+        
+        // Case 4: New segment overlaps the end of existing segment
+        if (startTime > segment.start && endTime >= segment.end) {
+          // Trim the existing segment's end
+          processedSegments.push({
+            ...segment,
+            end: startTime
+          })
+          continue
+        }
+      }
+    }
+    
+    // Add the new segment and sort by start time
+    const newSegments = [...processedSegments, newSegment].sort((a, b) => a.start - b.start)
+    
+    setLabelSegments(newSegments)
+    
+    // Clear inputs
+    setNewSegmentStart("")
+    setNewSegmentEnd("")
+    setNewSegmentLabel("")
+    setIsCustomLabel(false)
     setError(null)
   }
 
@@ -996,6 +1136,119 @@ export function OpenSignalsChart() {
           )}
         </div>
       </div>
+      <div id="add-segment-form" className="rounded-lg border p-4 space-y-3 bg-muted/30">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium">Add New Segment</h3>
+            <p className="text-xs text-muted-foreground">
+              Create a new labeled segment by specifying start time, end time, and label. If it overlaps with existing segments, those parts will be replaced. (Range: {timeMin.toFixed(2)}s - {timeMax.toFixed(2)}s)
+            </p>
+          </div>
+        </div>
+        <div className="flex items-end gap-3">
+          <div className="flex-1 space-y-1.5">
+            <label htmlFor="new-segment-start" className="text-xs font-medium">
+              Start Time (seconds)
+            </label>
+            <Input
+              id="new-segment-start"
+              type="number"
+              step="0.01"
+              min={timeMin}
+              max={timeMax}
+              placeholder="e.g., 10.00"
+              value={newSegmentStart}
+              onChange={(e) => setNewSegmentStart(e.target.value)}
+            />
+          </div>
+          <div className="flex-1 space-y-1.5">
+            <label htmlFor="new-segment-end" className="text-xs font-medium">
+              End Time (seconds)
+            </label>
+            <Input
+              id="new-segment-end"
+              type="number"
+              step="0.01"
+              min={timeMin}
+              max={timeMax}
+              placeholder="e.g., 15.00"
+              value={newSegmentEnd}
+              onChange={(e) => setNewSegmentEnd(e.target.value)}
+            />
+          </div>
+          <div className="flex-1 space-y-1.5">
+            <label htmlFor="new-segment-label" className="text-xs font-medium">
+              Label
+            </label>
+            <Select
+              value={isCustomLabel ? "__custom__" : newSegmentLabel}
+              onValueChange={(value) => {
+                if (value === "__custom__") {
+                  setIsCustomLabel(true)
+                  setNewSegmentLabel("")
+                } else {
+                  setIsCustomLabel(false)
+                  setNewSegmentLabel(value)
+                }
+              }}
+            >
+              <SelectTrigger id="new-segment-label" className="w-full">
+                <SelectValue placeholder="Select a label..." />
+              </SelectTrigger>
+              <SelectContent>
+                {uniqueLabelNames.length === 0 ? (
+                  <SelectItem value="__custom__">Enter custom label</SelectItem>
+                ) : (
+                  <>
+                    {uniqueLabelNames.map((label) => (
+                      <SelectItem key={label} value={label}>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="h-2.5 w-2.5 rounded-sm"
+                            style={{ backgroundColor: getLabelColor(label) }}
+                          />
+                          {label}
+                        </div>
+                      </SelectItem>
+                    ))}
+                    <SelectItem value="__custom__">Custom...</SelectItem>
+                  </>
+                )}
+              </SelectContent>
+            </Select>
+            {isCustomLabel && (
+              <Input
+                type="text"
+                placeholder="Enter custom label"
+                value={newSegmentLabel}
+                onChange={(e) => setNewSegmentLabel(e.target.value)}
+                autoFocus
+              />
+            )}
+          </div>
+          <Button
+            onClick={handleAddNewSegment}
+            disabled={!newSegmentStart || !newSegmentEnd || !newSegmentLabel}
+            size="default"
+          >
+            Add Segment
+          </Button>
+          {(newSegmentStart || newSegmentEnd || newSegmentLabel) && (
+            <Button
+              onClick={() => {
+                setNewSegmentStart("")
+                setNewSegmentEnd("")
+                setNewSegmentLabel("")
+                setIsCustomLabel(false)
+              }}
+              variant="outline"
+              size="default"
+            >
+              Clear
+            </Button>
+          )}
+        </div>
+      </div>
       <div
         ref={chartRef}
         onWheel={handleWheel}
@@ -1188,6 +1441,8 @@ export function OpenSignalsChart() {
             
             const circleRadius = (isHoveringStart || isDraggingStart || isHoveringEnd || isDraggingEnd) ? 8 : 6
             
+            const isHoveringQuickAdd = hoveredQuickAdd === idx
+            
             return (
               <g key={`circles-${segment.label}-${idx}-${segment.start.toFixed(3)}`}>
                 {/* Start circle */}
@@ -1210,6 +1465,47 @@ export function OpenSignalsChart() {
                   stroke="white"
                   strokeWidth={isHoveringEnd || isDraggingEnd ? 2 : 1.5}
                 />
+                {/* Quick-add button */}
+                <g
+                  transform={`translate(${endX + 15}, ${circleY})`}
+                  style={{ cursor: 'pointer', pointerEvents: 'auto' }}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleQuickAddSegment(segment.end)
+                  }}
+                  onMouseEnter={() => setHoveredQuickAdd(idx)}
+                  onMouseLeave={() => setHoveredQuickAdd(null)}
+                >
+                  {/* Background circle */}
+                  <circle
+                    cx={0}
+                    cy={0}
+                    r={isHoveringQuickAdd ? 11 : 10}
+                    fill="hsl(142 71% 45%)"
+                    fillOpacity={isHoveringQuickAdd ? 1 : 0.9}
+                    stroke="white"
+                    strokeWidth={2}
+                  />
+                  {/* Plus symbol */}
+                  <line
+                    x1={-4}
+                    y1={0}
+                    x2={4}
+                    y2={0}
+                    stroke="white"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                  />
+                  <line
+                    x1={0}
+                    y1={-4}
+                    x2={0}
+                    y2={4}
+                    stroke="white"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                  />
+                </g>
               </g>
             )
           })}
@@ -1232,7 +1528,7 @@ export function OpenSignalsChart() {
         </div>
       )}
       <p className="text-xs text-muted-foreground">
-        Scroll with mouse wheel or drag the brush below to navigate. Drag on the chart to pan. Click on a segment to select it, then press Delete or Backspace to remove it. Drag the colored circles at segment edges to adjust label boundaries (adjacent segments will move together to maintain continuity). Press Escape to deselect. Use the crop controls above to permanently trim the data to a specific time range.
+        Scroll with mouse wheel or drag the brush below to navigate. Drag on the chart to pan. Click on a segment to select it, then press Delete or Backspace to remove it. Drag the colored circles at segment edges to adjust label boundaries (adjacent segments will move together to maintain continuity). Click the green "+" button at the end of any segment to quickly add a 0.2s segment starting at that point. Press Escape to deselect. Use the "Add New Segment" section to create new labeled segments, and the crop controls to permanently trim the data to a specific time range.
       </p>
     </div>
   )
