@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, type ComponentProps } from "react"
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Brush, ReferenceArea } from "recharts"
 import {
   ChartContainer,
@@ -38,6 +38,7 @@ const LABEL_COLORS: Record<string, string> = {
 }
 
 const DEFAULT_LABEL_COLOR = "hsl(217 22% 67%)"
+const SEGMENT_MATCH_EPSILON = 0.002
 
 const chartConfig = {
   A1: {
@@ -525,7 +526,11 @@ export function OpenSignalsChart() {
                 />
               )
             })}
-            <ChartTooltip content={<ChartTooltipContent />} />
+            <ChartTooltip
+              content={
+                <HighlightAwareTooltipContent labelSegments={labelSegments} />
+              }
+            />
             <Line
               type="monotone"
               dataKey="A4"
@@ -576,6 +581,70 @@ export function OpenSignalsChart() {
       </p>
     </div>
   )
+}
+
+type TooltipContentProps = ComponentProps<typeof ChartTooltipContent>
+
+function HighlightAwareTooltipContent({
+  labelSegments,
+  ...tooltipProps
+}: TooltipContentProps & { labelSegments: LabelSegment[] }) {
+  if (!tooltipProps.active || !tooltipProps.payload?.length) {
+    return null
+  }
+
+  const payload = tooltipProps.payload!
+  const hoveredTimestamp = extractTimestampFromPayload(payload)
+  const activeSegment =
+    hoveredTimestamp === null
+      ? null
+      : findSegmentAtTimestamp(labelSegments, hoveredTimestamp)
+
+  if (!activeSegment) {
+    return <ChartTooltipContent {...tooltipProps} />
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <ChartTooltipContent {...tooltipProps} />
+      <div className="border-border/60 bg-background/95 text-[0.65rem] leading-tight rounded-lg border px-2 py-1 shadow-xl">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5">
+            <span
+              className="h-2.5 w-2.5 rounded-sm"
+              style={{ backgroundColor: getLabelColor(activeSegment.label) }}
+            />
+            <span className="font-medium text-foreground">{activeSegment.label}</span>
+          </div>
+          <span className="font-mono text-muted-foreground tabular-nums">
+            {formatSegmentRange(activeSegment)}
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function extractTimestampFromPayload(
+  payload: NonNullable<TooltipContentProps["payload"]>
+) {
+  const rawPoint = payload?.[0]?.payload as { timestamp?: number } | undefined
+  return typeof rawPoint?.timestamp === "number" ? rawPoint.timestamp : null
+}
+
+function findSegmentAtTimestamp(
+  segments: LabelSegment[],
+  timestamp: number
+) {
+  return segments.find(
+    (segment) =>
+      timestamp >= segment.start - SEGMENT_MATCH_EPSILON &&
+      timestamp <= segment.end + SEGMENT_MATCH_EPSILON
+  )
+}
+
+function formatSegmentRange(segment: LabelSegment) {
+  return `${segment.start.toFixed(2)}s - ${segment.end.toFixed(2)}s`
 }
 
 function getLabelColor(label: string) {
