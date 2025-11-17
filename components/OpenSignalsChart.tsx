@@ -685,12 +685,21 @@ export function OpenSignalsChart() {
               {...(yTicks ? { ticks: yTicks } : {})}
             />
             {labelSegments.map((segment, idx) => {
+              // Only render if segment overlaps with current domain
+              if (segment.end < currentDomain[0] || segment.start > currentDomain[1]) {
+                return null
+              }
+              
+              // Clamp segment boundaries to visible domain so background is always visible
+              const visibleStart = Math.max(segment.start, currentDomain[0])
+              const visibleEnd = Math.min(segment.end, currentDomain[1])
+              
               const color = getLabelColor(segment.label)
               return (
                 <ReferenceArea
                   key={`${segment.label}-${idx}-${segment.start.toFixed(3)}`}
-                  x1={segment.start}
-                  x2={segment.end}
+                  x1={visibleStart}
+                  x2={visibleEnd}
                   stroke="none"
                   fill={color}
                   fillOpacity={0.12}
