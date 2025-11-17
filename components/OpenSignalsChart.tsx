@@ -93,6 +93,9 @@ export function OpenSignalsChart() {
     segmentIndex: number
     edge: 'start' | 'end'
   } | null>(null)
+  
+  // State for selected segment
+  const [selectedSegmentIndex, setSelectedSegmentIndex] = useState<number | null>(null)
 
   const isEventFromBrush = (target: EventTarget | null) => {
     return target instanceof Element && !!target.closest(".recharts-brush")
@@ -187,6 +190,7 @@ export function OpenSignalsChart() {
       }
       
       setData(parsedData)
+      setSelectedSegmentIndex(null) // Reset selection when new data is loaded
 
       if (parsedData.length > 0) {
         setYRange([minA4, maxA4])
@@ -370,6 +374,32 @@ export function OpenSignalsChart() {
       }
     }
   }, [draggingEdge, data, xDomain])
+
+  // Handle keyboard events for deleting selected segment
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (selectedSegmentIndex === null) return
+      
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault()
+        setLabelSegments((prevSegments) => {
+          const newSegments = prevSegments.filter((_, idx) => idx !== selectedSegmentIndex)
+          return newSegments
+        })
+        setSelectedSegmentIndex(null)
+      }
+      
+      // ESC to deselect
+      if (e.key === 'Escape') {
+        setSelectedSegmentIndex(null)
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [selectedSegmentIndex])
 
   if (data.length === 0 && !loading) {
     return (
@@ -571,6 +601,23 @@ export function OpenSignalsChart() {
     return null
   }
 
+  // Helper function to find segment at mouse position
+  const findSegmentAtMouse = (clientX: number): number | null => {
+    const time = getTimeFromMouseX(clientX)
+    if (time === null) return null
+    
+    for (let idx = 0; idx < labelSegments.length; idx++) {
+      const segment = labelSegments[idx]
+      
+      // Check if time is within segment
+      if (time >= segment.start && time <= segment.end) {
+        return idx
+      }
+    }
+    
+    return null
+  }
+
   // Handle mouse down for dragging
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0 || isEventFromBrush(e.target)) {
@@ -591,6 +638,19 @@ export function OpenSignalsChart() {
       })
       return
     }
+    
+    // Check if clicking on a segment
+    const segmentIndex = findSegmentAtMouse(e.clientX)
+    
+    if (segmentIndex !== null) {
+      e.preventDefault()
+      e.stopPropagation()
+      setSelectedSegmentIndex(segmentIndex)
+      return
+    }
+    
+    // Clicking on empty space - deselect
+    setSelectedSegmentIndex(null)
     
     isDragging.current = true
     dragStart.current = {
@@ -632,6 +692,21 @@ export function OpenSignalsChart() {
                 </span>
               )}
             </p>
+            {selectedSegmentIndex !== null && labelSegments[selectedSegmentIndex] && (
+              <div className="mt-1 flex items-center gap-2 text-xs">
+                <span className="text-muted-foreground">Selected:</span>
+                <div className="flex items-center gap-1.5 rounded-md border px-2 py-0.5">
+                  <span
+                    className="h-2.5 w-2.5 rounded-sm"
+                    style={{ backgroundColor: getLabelColor(labelSegments[selectedSegmentIndex].label) }}
+                  />
+                  <span className="font-medium">{labelSegments[selectedSegmentIndex].label}</span>
+                  <span className="text-muted-foreground">
+                    ({labelSegments[selectedSegmentIndex].start.toFixed(2)}s - {labelSegments[selectedSegmentIndex].end.toFixed(2)}s)
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
           <Button
             variant="outline"
@@ -644,6 +719,7 @@ export function OpenSignalsChart() {
               setXDomain(undefined)
               setYRange(null)
               setError(null)
+              setSelectedSegmentIndex(null)
               if (signalInputRef.current) signalInputRef.current.value = ""
               if (keypressInputRef.current) keypressInputRef.current.value = ""
             }}
@@ -695,14 +771,17 @@ export function OpenSignalsChart() {
               const visibleEnd = Math.min(segment.end, currentDomain[1])
               
               const color = getLabelColor(segment.label)
+              const isSelected = selectedSegmentIndex === idx
+              
               return (
                 <ReferenceArea
                   key={`${segment.label}-${idx}-${segment.start.toFixed(3)}`}
                   x1={visibleStart}
                   x2={visibleEnd}
-                  stroke="none"
+                  stroke={isSelected ? color : "none"}
+                  strokeWidth={isSelected ? 2 : 0}
                   fill={color}
-                  fillOpacity={0.12}
+                  fillOpacity={isSelected ? 0.25 : 0.12}
                   {...(yDomain ? { y1: yDomain[0], y2: yDomain[1] } : {})}
                 />
               )
@@ -787,7 +866,7 @@ export function OpenSignalsChart() {
         </div>
       )}
       <p className="text-xs text-muted-foreground">
-        Scroll with mouse wheel or drag the brush below to navigate. Drag on the chart to pan. Drag the colored lines at segment edges to adjust label boundaries (adjacent segments will move together to maintain continuity).
+        Scroll with mouse wheel or drag the brush below to navigate. Drag on the chart to pan. Click on a segment to select it, then press Delete or Backspace to remove it. Drag the colored lines at segment edges to adjust label boundaries (adjacent segments will move together to maintain continuity). Press Escape to deselect.
       </p>
     </div>
   )
