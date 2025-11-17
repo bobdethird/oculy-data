@@ -277,12 +277,20 @@ export function OpenSignalsChart() {
     if (isEventFromBrush(e.target)) {
       return
     }
+
+    const horizontalScroll = Math.abs(e.deltaX) > Math.abs(e.deltaY)
+    if (!horizontalScroll) {
+      return
+    }
+
     e.preventDefault()
-    const delta = e.deltaY > 0 ? 1 : -1
-    const scrollAmount = domainWidth * 0.1 // Scroll 10% of visible window
-    
-    let newStart = currentDomain[0] - delta * scrollAmount
-    let newEnd = currentDomain[1] - delta * scrollAmount
+    e.stopPropagation()
+    const chartWidth = chartRef.current?.clientWidth || 800
+    const timePerPixel = domainWidth / chartWidth
+    const timeDelta = e.deltaX * timePerPixel
+
+    let newStart = currentDomain[0] + timeDelta
+    let newEnd = currentDomain[1] + timeDelta
     
     // Keep within bounds
     if (newStart < timeMin) {
