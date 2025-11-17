@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, type ComponentProps } from "react"
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Brush, ReferenceArea } from "recharts"
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Brush, ReferenceArea, ReferenceLine } from "recharts"
 import {
   ChartContainer,
   ChartTooltip,
@@ -81,6 +81,18 @@ export function OpenSignalsChart() {
   const dragStart = useRef<{ x: number; domain: [number, number] } | null>(null)
   const signalInputRef = useRef<HTMLInputElement>(null)
   const keypressInputRef = useRef<HTMLInputElement>(null)
+  
+  // State for dragging segment edges
+  const [draggingEdge, setDraggingEdge] = useState<{
+    segmentIndex: number
+    edge: 'start' | 'end'
+    initialX: number
+    initialTime: number
+  } | null>(null)
+  const [hoveredEdge, setHoveredEdge] = useState<{
+    segmentIndex: number
+    edge: 'start' | 'end'
+  } | null>(null)
 
   const isEventFromBrush = (target: EventTarget | null) => {
     return target instanceof Element && !!target.closest(".recharts-brush")
@@ -283,6 +295,82 @@ export function OpenSignalsChart() {
     }
   }, [data])
 
+  // Handle mouse move for dragging segment edges
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!draggingEdge) return
+
+      const chartWidth = chartRef.current?.clientWidth || 800
+      const currentDomainWidth = xDomain ? xDomain[1] - xDomain[0] : (data.length > 0 ? data[data.length - 1].timestamp - data[0].timestamp : 1)
+      const timePerPixel = currentDomainWidth / chartWidth
+      const deltaX = e.clientX - draggingEdge.initialX
+      const timeDelta = deltaX * timePerPixel
+
+      const newTime = draggingEdge.initialTime + timeDelta
+
+      // Update the segment and adjacent segments to maintain continuity
+      setLabelSegments((prevSegments) => {
+        const newSegments = [...prevSegments]
+        const segment = newSegments[draggingEdge.segmentIndex]
+        
+        if (draggingEdge.edge === 'start') {
+          // When dragging start edge, also update the end of the previous segment
+          const prevSegmentIndex = draggingEdge.segmentIndex - 1
+          
+          if (prevSegmentIndex >= 0) {
+            const prevSegment = newSegments[prevSegmentIndex]
+            // Don't let it go past the current segment's end or before previous segment's start
+            const constrainedTime = Math.max(
+              prevSegment.start + 0.01,
+              Math.min(newTime, segment.end - 0.01)
+            )
+            segment.start = constrainedTime
+            prevSegment.end = constrainedTime
+          } else {
+            // First segment - just constrain to not go past end
+            segment.start = Math.min(newTime, segment.end - 0.01)
+          }
+        } else {
+          // When dragging end edge, also update the start of the next segment
+          const nextSegmentIndex = draggingEdge.segmentIndex + 1
+          
+          if (nextSegmentIndex < newSegments.length) {
+            const nextSegment = newSegments[nextSegmentIndex]
+            // Don't let it go before the current segment's start or past next segment's end
+            const constrainedTime = Math.min(
+              nextSegment.end - 0.01,
+              Math.max(newTime, segment.start + 0.01)
+            )
+            segment.end = constrainedTime
+            nextSegment.start = constrainedTime
+          } else {
+            // Last segment - just constrain to not go before start
+            segment.end = Math.max(newTime, segment.start + 0.01)
+          }
+        }
+        
+        return newSegments
+      })
+    }
+
+    const handleMouseUp = () => {
+      setDraggingEdge(null)
+      document.body.style.cursor = ''
+    }
+
+    if (draggingEdge) {
+      document.body.style.cursor = 'ew-resize'
+      document.addEventListener("mousemove", handleMouseMove)
+      document.addEventListener("mouseup", handleMouseUp)
+      
+      return () => {
+        document.removeEventListener("mousemove", handleMouseMove)
+        document.removeEventListener("mouseup", handleMouseUp)
+        document.body.style.cursor = ''
+      }
+    }
+  }, [draggingEdge, data, xDomain])
+
   if (data.length === 0 && !loading) {
     return (
       <div className="w-full space-y-6">
@@ -432,11 +520,78 @@ export function OpenSignalsChart() {
     setXDomain([newStart, newEnd])
   }
 
+  // Helper function to get time from mouse position
+  const getTimeFromMouseX = (clientX: number): number | null => {
+    if (!chartRef.current) return null
+    
+    const rect = chartRef.current.getBoundingClientRect()
+    const chartWidth = rect.width
+    const margin = { left: 20, right: 30 }
+    const plotWidth = chartWidth - margin.left - margin.right
+    
+    const relativeX = clientX - rect.left - margin.left
+    if (relativeX < 0 || relativeX > plotWidth) return null
+    
+    const domainWidth = currentDomain[1] - currentDomain[0]
+    const time = currentDomain[0] + (relativeX / plotWidth) * domainWidth
+    
+    return time
+  }
+
+  // Helper function to find edge near mouse position
+  const findEdgeNearMouse = (clientX: number): { segmentIndex: number; edge: 'start' | 'end'; time: number } | null => {
+    const time = getTimeFromMouseX(clientX)
+    if (time === null) return null
+    
+    // Threshold in time units for detecting edge proximity
+    const domainWidth = currentDomain[1] - currentDomain[0]
+    const chartWidth = chartRef.current?.clientWidth || 800
+    const pixelThreshold = 8 // pixels
+    const timeThreshold = (pixelThreshold / chartWidth) * domainWidth
+    
+    for (let idx = 0; idx < labelSegments.length; idx++) {
+      const segment = labelSegments[idx]
+      
+      // Check if segment is visible
+      if (segment.end < currentDomain[0] || segment.start > currentDomain[1]) {
+        continue
+      }
+      
+      // Check start edge
+      if (Math.abs(time - segment.start) <= timeThreshold) {
+        return { segmentIndex: idx, edge: 'start', time: segment.start }
+      }
+      
+      // Check end edge
+      if (Math.abs(time - segment.end) <= timeThreshold) {
+        return { segmentIndex: idx, edge: 'end', time: segment.end }
+      }
+    }
+    
+    return null
+  }
+
   // Handle mouse down for dragging
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0 || isEventFromBrush(e.target)) {
       return
     }
+    
+    // Check if clicking near a segment edge
+    const edge = findEdgeNearMouse(e.clientX)
+    
+    if (edge) {
+      e.preventDefault()
+      e.stopPropagation()
+      setDraggingEdge({
+        segmentIndex: edge.segmentIndex,
+        edge: edge.edge,
+        initialX: e.clientX,
+        initialTime: edge.time
+      })
+      return
+    }
+    
     isDragging.current = true
     dragStart.current = {
       x: e.clientX,
@@ -444,6 +599,22 @@ export function OpenSignalsChart() {
     }
     if (chartRef.current) {
       chartRef.current.style.cursor = "grabbing"
+    }
+  }
+
+  // Handle mouse move over segment edges for cursor change
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (draggingEdge || isDragging.current) return
+    
+    const edge = findEdgeNearMouse(e.clientX)
+    
+    if (edge) {
+      setHoveredEdge({
+        segmentIndex: edge.segmentIndex,
+        edge: edge.edge
+      })
+    } else if (hoveredEdge) {
+      setHoveredEdge(null)
     }
   }
 
@@ -490,7 +661,8 @@ export function OpenSignalsChart() {
         ref={chartRef}
         onWheel={handleWheel}
         onMouseDown={handleMouseDown}
-        style={{ cursor: "grab" }}
+        onMouseMove={handleMouseMove}
+        style={{ cursor: hoveredEdge ? "ew-resize" : "grab" }}
         className="select-none"
       >
         <ChartContainer config={channelConfig} className="h-[600px] w-full">
@@ -524,6 +696,35 @@ export function OpenSignalsChart() {
                   fillOpacity={0.12}
                   {...(yDomain ? { y1: yDomain[0], y2: yDomain[1] } : {})}
                 />
+              )
+            })}
+            {labelSegments.map((segment, idx) => {
+              // Only show edges for segments visible in current domain
+              if (segment.end < currentDomain[0] || segment.start > currentDomain[1]) {
+                return null
+              }
+              
+              const color = getLabelColor(segment.label)
+              const isHoveringStart = hoveredEdge?.segmentIndex === idx && hoveredEdge?.edge === 'start'
+              const isHoveringEnd = hoveredEdge?.segmentIndex === idx && hoveredEdge?.edge === 'end'
+              const isDraggingStart = draggingEdge?.segmentIndex === idx && draggingEdge?.edge === 'start'
+              const isDraggingEnd = draggingEdge?.segmentIndex === idx && draggingEdge?.edge === 'end'
+              
+              return (
+                <g key={`edges-${segment.label}-${idx}-${segment.start.toFixed(3)}`}>
+                  <ReferenceLine
+                    x={segment.start}
+                    stroke={color}
+                    strokeWidth={isHoveringStart || isDraggingStart ? 4 : 2}
+                    strokeOpacity={isHoveringStart || isDraggingStart ? 1 : 0.6}
+                  />
+                  <ReferenceLine
+                    x={segment.end}
+                    stroke={color}
+                    strokeWidth={isHoveringEnd || isDraggingEnd ? 4 : 2}
+                    strokeOpacity={isHoveringEnd || isDraggingEnd ? 1 : 0.6}
+                  />
+                </g>
               )
             })}
             <ChartTooltip
@@ -577,7 +778,7 @@ export function OpenSignalsChart() {
         </div>
       )}
       <p className="text-xs text-muted-foreground">
-        Scroll with mouse wheel or drag the brush below to navigate. Drag on the chart to pan.
+        Scroll with mouse wheel or drag the brush below to navigate. Drag on the chart to pan. Drag the colored lines at segment edges to adjust label boundaries (adjacent segments will move together to maintain continuity).
       </p>
     </div>
   )
