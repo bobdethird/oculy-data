@@ -740,8 +740,10 @@ export function OpenSignalsChart() {
     // Threshold in time units for detecting edge proximity
     const domainWidth = currentDomain[1] - currentDomain[0]
     const chartWidth = chartRef.current?.clientWidth || 800
-    const pixelThreshold = 8 // pixels
-    const timeThreshold = (pixelThreshold / chartWidth) * domainWidth
+    const margin = { left: 20, right: 30 }
+    const plotWidth = chartWidth - margin.left - margin.right
+    const pixelThreshold = 15 // pixels - increased for easier grabbing
+    const timeThreshold = (pixelThreshold / plotWidth) * domainWidth
     
     for (let idx = 0; idx < labelSegments.length; idx++) {
       const segment = labelSegments[idx]
@@ -990,7 +992,7 @@ export function OpenSignalsChart() {
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         style={{ cursor: hoveredEdge ? "ew-resize" : "grab" }}
-        className="select-none"
+        className="select-none relative"
       >
         <ChartContainer config={channelConfig} className="h-[600px] w-full">
           <LineChart
@@ -1140,6 +1142,66 @@ export function OpenSignalsChart() {
             />
           </LineChart>
         </ChartContainer>
+        
+        {/* SVG Overlay for draggable circles at segment boundaries */}
+        <svg
+          className="absolute top-0 left-0 w-full h-[600px] pointer-events-none"
+          style={{ overflow: 'visible' }}
+        >
+          {labelSegments.map((segment, idx) => {
+            // Only show circles for segments visible in current domain
+            if (segment.end < currentDomain[0] || segment.start > currentDomain[1]) {
+              return null
+            }
+            
+            const color = getLabelColor(segment.label)
+            const isHoveringStart = hoveredEdge?.segmentIndex === idx && hoveredEdge?.edge === 'start'
+            const isHoveringEnd = hoveredEdge?.segmentIndex === idx && hoveredEdge?.edge === 'end'
+            const isDraggingStart = draggingEdge?.segmentIndex === idx && draggingEdge?.edge === 'start'
+            const isDraggingEnd = draggingEdge?.segmentIndex === idx && draggingEdge?.edge === 'end'
+            
+            // Calculate pixel positions
+            const chartWidth = chartRef.current?.clientWidth || 800
+            const chartHeight = 600
+            const margin = { top: 5, right: 30, left: 20, bottom: 80 }
+            const plotWidth = chartWidth - margin.left - margin.right
+            const plotHeight = chartHeight - margin.top - margin.bottom
+            const domainWidth = currentDomain[1] - currentDomain[0]
+            
+            const startX = margin.left + ((segment.start - currentDomain[0]) / domainWidth) * plotWidth
+            const endX = margin.left + ((segment.end - currentDomain[0]) / domainWidth) * plotWidth
+            
+            // Position circles in the middle of the chart vertically
+            const circleY = margin.top + plotHeight / 2
+            
+            const circleRadius = (isHoveringStart || isDraggingStart || isHoveringEnd || isDraggingEnd) ? 8 : 6
+            
+            return (
+              <g key={`circles-${segment.label}-${idx}-${segment.start.toFixed(3)}`}>
+                {/* Start circle */}
+                <circle
+                  cx={startX}
+                  cy={circleY}
+                  r={circleRadius}
+                  fill={color}
+                  fillOpacity={isHoveringStart || isDraggingStart ? 0.9 : 0.7}
+                  stroke="white"
+                  strokeWidth={isHoveringStart || isDraggingStart ? 2 : 1.5}
+                />
+                {/* End circle */}
+                <circle
+                  cx={endX}
+                  cy={circleY}
+                  r={circleRadius}
+                  fill={color}
+                  fillOpacity={isHoveringEnd || isDraggingEnd ? 0.9 : 0.7}
+                  stroke="white"
+                  strokeWidth={isHoveringEnd || isDraggingEnd ? 2 : 1.5}
+                />
+              </g>
+            )
+          })}
+        </svg>
       </div>
       {labelSegments.length > 0 && (
         <div className="space-y-1">
@@ -1158,7 +1220,7 @@ export function OpenSignalsChart() {
         </div>
       )}
       <p className="text-xs text-muted-foreground">
-        Scroll with mouse wheel or drag the brush below to navigate. Drag on the chart to pan. Click on a segment to select it, then press Delete or Backspace to remove it. Drag the colored lines at segment edges to adjust label boundaries (adjacent segments will move together to maintain continuity). Press Escape to deselect. Use the crop controls above to permanently trim the data to a specific time range.
+        Scroll with mouse wheel or drag the brush below to navigate. Drag on the chart to pan. Click on a segment to select it, then press Delete or Backspace to remove it. Drag the colored circles at segment edges to adjust label boundaries (adjacent segments will move together to maintain continuity). Press Escape to deselect. Use the crop controls above to permanently trim the data to a specific time range.
       </p>
     </div>
   )
