@@ -96,6 +96,16 @@ export function OpenSignalsChart() {
   
   // State for selected segment
   const [selectedSegmentIndex, setSelectedSegmentIndex] = useState<number | null>(null)
+  
+  // State for cropping
+  const [cropStart, setCropStart] = useState<string>("")
+  const [cropEnd, setCropEnd] = useState<string>("")
+  const [showCropPreview, setShowCropPreview] = useState(false)
+  
+  // State to track original signal start timestamp for export
+  const [signalStartTimestampMs, setSignalStartTimestampMs] = useState<number | null>(null)
+  const [keypressStartTimestampMs, setKeypressStartTimestampMs] = useState<number | null>(null)
+  const [keypressSamplingRate, setKeypressSamplingRate] = useState(1000)
 
   const isEventFromBrush = (target: EventTarget | null) => {
     return target instanceof Element && !!target.closest(".recharts-brush")
@@ -116,7 +126,7 @@ export function OpenSignalsChart() {
       // Parse header to get sampling rate & absolute start time
       let samplingRate = 1000 // default
       let dataStartIndex = 0
-      let signalStartTimestampMs: number | null = null
+      let parsedSignalStartTimestampMs: number | null = null
 
       for (let i = 0; i < lines.length; i++) {
         if (lines[i].startsWith("# EndOfHeader")) {
@@ -137,7 +147,7 @@ export function OpenSignalsChart() {
                 const isoString = `${deviceInfo.date}T${deviceInfo.time}`
                 const parsedDate = new Date(isoString)
                 if (!isNaN(parsedDate.getTime())) {
-                  signalStartTimestampMs = parsedDate.getTime()
+                  parsedSignalStartTimestampMs = parsedDate.getTime()
                 }
               }
             }
@@ -202,12 +212,15 @@ export function OpenSignalsChart() {
       const timeMax = parsedData.length > 0 ? parsedData[parsedData.length - 1].timestamp : 0
 
       // Align keypress labels with the OpenSignals timestamps
-      const segments = parseKeypressLabelSegments(
+      const result = parseKeypressLabelSegmentsWithMetadata(
         keypressText,
-        signalStartTimestampMs,
+        parsedSignalStartTimestampMs,
         [timeMin, timeMax]
       )
-      setLabelSegments(segments)
+      setLabelSegments(result.segments)
+      setSignalStartTimestampMs(parsedSignalStartTimestampMs)
+      setKeypressStartTimestampMs(result.keypressStartTimestampMs)
+      setKeypressSamplingRate(result.samplingRate)
 
       // Set initial domain to show first portion of data
       if (parsedData.length > 0) {
@@ -249,6 +262,157 @@ export function OpenSignalsChart() {
     } else {
       setError("Please select both files")
     }
+  }
+
+  const handleExportLabels = () => {
+    if (labelSegments.length === 0) {
+      setError("No label segments to export")
+      return
+    }
+    
+    if (signalStartTimestampMs === null || keypressStartTimestampMs === null) {
+      setError("Missing timestamp metadata for export")
+      return
+    }
+    
+    // Generate the file contents
+    const lines: string[] = []
+    
+    // Add header
+    const recordingDate = new Date(keypressStartTimestampMs)
+    const dateStr = recordingDate.toISOString().replace('T', ' ').substring(0, 23)
+    
+    lines.push("# Eye Tracking Keypress Labels")
+    lines.push(`# Recording started: ${dateStr}`)
+    lines.push(`# Sampling rate: ${keypressSamplingRate} Hz (${1000/keypressSamplingRate} ms per sample)`)
+    lines.push("# Columns: sample_number, timestamp_ms, elapsed_ms, label")
+    lines.push("# Labels: " + Array.from(new Set(labelSegments.map(s => s.label))).join(", "))
+    lines.push("# Exported with modifications")
+    lines.push("# EndOfHeader")
+    
+    // Generate data rows
+    let sampleNumber = 0
+    const sampleIntervalMs = 1000 / keypressSamplingRate
+    
+    for (const segment of labelSegments) {
+      // Convert relative seconds to absolute timestamps
+      const segmentStartMs = signalStartTimestampMs + (segment.start * 1000)
+      const segmentEndMs = signalStartTimestampMs + (segment.end * 1000)
+      const segmentDurationMs = segmentEndMs - segmentStartMs
+      
+      // Generate samples for this segment
+      const numSamples = Math.max(1, Math.ceil(segmentDurationMs / sampleIntervalMs))
+      
+      for (let i = 0; i < numSamples; i++) {
+        const timestampMs = segmentStartMs + (i * sampleIntervalMs)
+        const elapsedMs = timestampMs - keypressStartTimestampMs
+        
+        lines.push(`${sampleNumber}\t${timestampMs.toFixed(3)}\t${elapsedMs.toFixed(3)}\t${segment.label}`)
+        sampleNumber++
+      }
+    }
+    
+    // Create and download the file
+    const content = lines.join('\n')
+    const blob = new Blob([content], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    
+    // Generate filename with timestamp
+    const now = new Date()
+    const timestamp = now.toISOString().replace(/[:.]/g, '-').substring(0, 19)
+    a.download = `keypress_labels_edited_${timestamp}.txt`
+    
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  const handleApplyCrop = () => {
+    if (data.length === 0) return
+    
+    const timeMin = data[0].timestamp
+    const timeMax = data[data.length - 1].timestamp
+    
+    const startTime = cropStart ? parseFloat(cropStart) : timeMin
+    const endTime = cropEnd ? parseFloat(cropEnd) : timeMax
+    
+    if (isNaN(startTime) || isNaN(endTime)) {
+      setError("Invalid crop times. Please enter valid numbers.")
+      return
+    }
+    
+    if (startTime >= endTime) {
+      setError("Crop start time must be less than end time.")
+      return
+    }
+    
+    if (startTime < timeMin || endTime > timeMax) {
+      setError(`Crop times must be within data range (${timeMin.toFixed(2)}s - ${timeMax.toFixed(2)}s).`)
+      return
+    }
+    
+    // Filter data to crop range
+    const croppedData = data.filter(point => 
+      point.timestamp >= startTime && point.timestamp <= endTime
+    )
+    
+    if (croppedData.length === 0) {
+      setError("Crop range contains no data points.")
+      return
+    }
+    
+    // Renormalize timestamps to start at 0
+    const offset = croppedData[0].timestamp
+    const normalizedData = croppedData.map(point => ({
+      ...point,
+      timestamp: point.timestamp - offset
+    }))
+    
+    // Adjust label segments
+    const croppedSegments = labelSegments
+      .map(segment => ({
+        ...segment,
+        start: segment.start - offset,
+        end: segment.end - offset
+      }))
+      .filter(segment => 
+        segment.end >= 0 && segment.start <= normalizedData[normalizedData.length - 1].timestamp
+      )
+      .map(segment => ({
+        ...segment,
+        start: Math.max(0, segment.start),
+        end: Math.min(normalizedData[normalizedData.length - 1].timestamp, segment.end)
+      }))
+    
+    // Update state
+    setData(normalizedData)
+    setLabelSegments(croppedSegments)
+    
+    // Recalculate Y range
+    let minA4 = Number.POSITIVE_INFINITY
+    let maxA4 = Number.NEGATIVE_INFINITY
+    normalizedData.forEach(point => {
+      minA4 = Math.min(minA4, point.A4)
+      maxA4 = Math.max(maxA4, point.A4)
+    })
+    setYRange([minA4, maxA4])
+    
+    // Reset domain to show first portion
+    const newTimeMin = normalizedData[0].timestamp
+    const newTimeMax = normalizedData[normalizedData.length - 1].timestamp
+    const totalDuration = newTimeMax - newTimeMin
+    const windowSize = Math.min(totalDuration, 10)
+    setXDomain([newTimeMin, newTimeMin + windowSize])
+    
+    // Reset crop inputs and preview
+    setCropStart("")
+    setCropEnd("")
+    setShowCropPreview(false)
+    setSelectedSegmentIndex(null)
+    setError(null)
   }
 
   // Handle mouse move for dragging - must be before conditional returns
@@ -708,24 +872,37 @@ export function OpenSignalsChart() {
               </div>
             )}
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              setData([])
-              setLabelSegments([])
-              setSignalFile(null)
-              setKeypressFile(null)
-              setXDomain(undefined)
-              setYRange(null)
-              setError(null)
-              setSelectedSegmentIndex(null)
-              if (signalInputRef.current) signalInputRef.current.value = ""
-              if (keypressInputRef.current) keypressInputRef.current.value = ""
-            }}
-          >
-            Reset
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleExportLabels}
+              disabled={labelSegments.length === 0}
+            >
+              Export Labels
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setData([])
+                setLabelSegments([])
+                setSignalFile(null)
+                setKeypressFile(null)
+                setXDomain(undefined)
+                setYRange(null)
+                setError(null)
+                setSelectedSegmentIndex(null)
+                setSignalStartTimestampMs(null)
+                setKeypressStartTimestampMs(null)
+                setKeypressSamplingRate(1000)
+                if (signalInputRef.current) signalInputRef.current.value = ""
+                if (keypressInputRef.current) keypressInputRef.current.value = ""
+              }}
+            >
+              Reset
+            </Button>
+          </div>
         </div>
       </div>
       {error && (
@@ -733,6 +910,80 @@ export function OpenSignalsChart() {
           <p className="text-sm text-destructive">{error}</p>
         </div>
       )}
+      <div className="rounded-lg border p-4 space-y-3 bg-muted/30">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium">Crop Data</h3>
+            <p className="text-xs text-muted-foreground">
+              Set start and end times to permanently crop the data (range: {timeMin.toFixed(2)}s - {timeMax.toFixed(2)}s)
+            </p>
+          </div>
+        </div>
+        <div className="flex items-end gap-3">
+          <div className="flex-1 space-y-1.5">
+            <label htmlFor="crop-start" className="text-xs font-medium">
+              Start Time (seconds)
+            </label>
+            <Input
+              id="crop-start"
+              type="number"
+              step="0.01"
+              min={timeMin}
+              max={timeMax}
+              placeholder={`${timeMin.toFixed(2)}`}
+              value={cropStart}
+              onChange={(e) => setCropStart(e.target.value)}
+              onFocus={() => setShowCropPreview(true)}
+              onBlur={() => {
+                if (!cropStart && !cropEnd) {
+                  setShowCropPreview(false)
+                }
+              }}
+            />
+          </div>
+          <div className="flex-1 space-y-1.5">
+            <label htmlFor="crop-end" className="text-xs font-medium">
+              End Time (seconds)
+            </label>
+            <Input
+              id="crop-end"
+              type="number"
+              step="0.01"
+              min={timeMin}
+              max={timeMax}
+              placeholder={`${timeMax.toFixed(2)}`}
+              value={cropEnd}
+              onChange={(e) => setCropEnd(e.target.value)}
+              onFocus={() => setShowCropPreview(true)}
+              onBlur={() => {
+                if (!cropStart && !cropEnd) {
+                  setShowCropPreview(false)
+                }
+              }}
+            />
+          </div>
+          <Button
+            onClick={handleApplyCrop}
+            disabled={!cropStart && !cropEnd}
+            size="default"
+          >
+            Apply Crop
+          </Button>
+          {(cropStart || cropEnd) && (
+            <Button
+              onClick={() => {
+                setCropStart("")
+                setCropEnd("")
+                setShowCropPreview(false)
+              }}
+              variant="outline"
+              size="default"
+            >
+              Clear
+            </Button>
+          )}
+        </div>
+      </div>
       <div
         ref={chartRef}
         onWheel={handleWheel}
@@ -760,6 +1011,47 @@ export function OpenSignalsChart() {
               {...(yDomain ? { domain: yDomain } : {})}
               {...(yTicks ? { ticks: yTicks } : {})}
             />
+            {showCropPreview && (cropStart || cropEnd) && (() => {
+              const startTime = cropStart ? parseFloat(cropStart) : timeMin
+              const endTime = cropEnd ? parseFloat(cropEnd) : timeMax
+              
+              if (!isNaN(startTime) && !isNaN(endTime) && startTime < endTime) {
+                return (
+                  <>
+                    {/* Gray out area before crop start */}
+                    {startTime > timeMin && (
+                      <ReferenceArea
+                        x1={Math.max(timeMin, currentDomain[0])}
+                        x2={Math.min(startTime, currentDomain[1])}
+                        fill="hsl(0 0% 50%)"
+                        fillOpacity={0.3}
+                        {...(yDomain ? { y1: yDomain[0], y2: yDomain[1] } : {})}
+                      />
+                    )}
+                    {/* Gray out area after crop end */}
+                    {endTime < timeMax && (
+                      <ReferenceArea
+                        x1={Math.max(endTime, currentDomain[0])}
+                        x2={Math.min(timeMax, currentDomain[1])}
+                        fill="hsl(0 0% 50%)"
+                        fillOpacity={0.3}
+                        {...(yDomain ? { y1: yDomain[0], y2: yDomain[1] } : {})}
+                      />
+                    )}
+                    {/* Highlight the kept region with green border */}
+                    <ReferenceArea
+                      x1={Math.max(startTime, currentDomain[0])}
+                      x2={Math.min(endTime, currentDomain[1])}
+                      stroke="hsl(142 71% 45%)"
+                      strokeWidth={2}
+                      fill="transparent"
+                      {...(yDomain ? { y1: yDomain[0], y2: yDomain[1] } : {})}
+                    />
+                  </>
+                )
+              }
+              return null
+            })()}
             {labelSegments.map((segment, idx) => {
               // Only render if segment overlaps with current domain
               if (segment.end < currentDomain[0] || segment.start > currentDomain[1]) {
@@ -866,7 +1158,7 @@ export function OpenSignalsChart() {
         </div>
       )}
       <p className="text-xs text-muted-foreground">
-        Scroll with mouse wheel or drag the brush below to navigate. Drag on the chart to pan. Click on a segment to select it, then press Delete or Backspace to remove it. Drag the colored lines at segment edges to adjust label boundaries (adjacent segments will move together to maintain continuity). Press Escape to deselect.
+        Scroll with mouse wheel or drag the brush below to navigate. Drag on the chart to pan. Click on a segment to select it, then press Delete or Backspace to remove it. Drag the colored lines at segment edges to adjust label boundaries (adjacent segments will move together to maintain continuity). Press Escape to deselect. Use the crop controls above to permanently trim the data to a specific time range.
       </p>
     </div>
   )
@@ -940,17 +1232,21 @@ function getLabelColor(label: string) {
   return LABEL_COLORS[label] ?? DEFAULT_LABEL_COLOR
 }
 
-function parseKeypressLabelSegments(
+function parseKeypressLabelSegmentsWithMetadata(
   fileContents: string,
   signalStartTimestampMs: number | null,
   signalTimeRange: [number, number]
-): LabelSegment[] {
+): {
+  segments: LabelSegment[]
+  keypressStartTimestampMs: number | null
+  samplingRate: number
+} {
   if (!fileContents) {
-    return []
+    return { segments: [], keypressStartTimestampMs: null, samplingRate: 1000 }
   }
   if (signalStartTimestampMs === null) {
     console.warn("Missing OpenSignals start timestamp; cannot align keypress labels.")
-    return []
+    return { segments: [], keypressStartTimestampMs: null, samplingRate: 1000 }
   }
 
   const lines = fileContents.split("\n")
@@ -1051,10 +1347,10 @@ function parseKeypressLabelSegments(
 
   const [rangeStart, rangeEnd] = signalTimeRange
   if (rangeEnd <= rangeStart) {
-    return []
+    return { segments: [], keypressStartTimestampMs: recordingStartTimestampMs, samplingRate }
   }
 
-  return rawSegments
+  const segments = rawSegments
     .map((segment) => {
       const minEnd = segment.start + sampleIntervalSec
       const expandedEnd = Math.max(segment.end, minEnd)
@@ -1067,5 +1363,11 @@ function parseKeypressLabelSegments(
       }
     })
     .filter((segment) => segment.end > segment.start)
+  
+  return {
+    segments,
+    keypressStartTimestampMs: recordingStartTimestampMs,
+    samplingRate
+  }
 }
 
