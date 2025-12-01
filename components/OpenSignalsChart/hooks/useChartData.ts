@@ -55,7 +55,34 @@ export function useChartData() {
                 samplingRate = deviceInfo["sampling rate"]
               }
               if (deviceInfo?.date && deviceInfo?.time) {
-                const isoString = `${deviceInfo.date}T${deviceInfo.time}`
+                let dateStr = deviceInfo.date
+                // Ensure date components are padded (e.g. 2025-11-9 -> 2025-11-09)
+                const parts = dateStr.split('-')
+                if (parts.length === 3) {
+                  const year = parts[0]
+                  const month = parts[1].padStart(2, '0')
+                  const day = parts[2].padStart(2, '0')
+                  dateStr = `${year}-${month}-${day}`
+                }
+
+                let timeStr = deviceInfo.time
+                // Ensure time components are padded (e.g. 17:31:9.147 -> 17:31:09.147)
+                const timeParts = timeStr.split(':')
+                if (timeParts.length === 3) {
+                  const hours = timeParts[0].padStart(2, '0')
+                  const minutes = timeParts[1].padStart(2, '0')
+                  // Handle seconds and milliseconds
+                  let seconds = timeParts[2]
+                  if (seconds.includes('.')) {
+                    const [sec, ms] = seconds.split('.')
+                    seconds = `${sec.padStart(2, '0')}.${ms}`
+                  } else {
+                    seconds = seconds.padStart(2, '0')
+                  }
+                  timeStr = `${hours}:${minutes}:${seconds}`
+                }
+                
+                const isoString = `${dateStr}T${timeStr}`
                 const parsedDate = new Date(isoString)
                 if (!isNaN(parsedDate.getTime())) {
                   parsedSignalStartTimestampMs = parsedDate.getTime()

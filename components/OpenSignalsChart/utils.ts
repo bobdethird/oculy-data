@@ -48,7 +48,20 @@ export function parseKeypressLabelSegmentsWithMetadata(
 
     if (rawLine.startsWith("# Recording started:")) {
       const datePart = rawLine.replace("# Recording started:", "").trim()
-      const parsedDate = new Date(datePart.replace(" ", "T"))
+      // Handle potential unpadded dates
+      const [dateStr, timeStr] = datePart.split(" ")
+      let normalizedDateStr = dateStr
+      if (dateStr && dateStr.includes("-")) {
+        const parts = dateStr.split("-")
+        if (parts.length === 3) {
+          const year = parts[0]
+          const month = parts[1].padStart(2, '0')
+          const day = parts[2].padStart(2, '0')
+          normalizedDateStr = `${year}-${month}-${day}`
+        }
+      }
+      
+      const parsedDate = new Date(`${normalizedDateStr}T${timeStr}`)
       if (!isNaN(parsedDate.getTime())) {
         recordingStartTimestampMs = parsedDate.getTime()
       }
